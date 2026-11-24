@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ops Tracker</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root { --navy:#1f3864; --ink:#222; --muted:#6b7280; --line:#e5e7eb; --bg:#f7f8fa; --red:#b00000; --redbg:#fdecec; --green:#107c41; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"Segoe UI", Arial, sans-serif; font-size:13px; color:var(--ink); background:#fff; }
+  header { background:var(--navy); color:#fff; padding:10px 12px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:2; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .stamp { font-size:11px; opacity:.8; }
+  button { font:inherit; cursor:pointer; border-radius:4px; }
+  .refresh { background:#fff; color:var(--navy); border:0; padding:4px 10px; font-weight:600; }
+  nav { display:flex; border-bottom:1px solid var(--line); background:var(--bg); position:sticky; top:44px; z-index:2; }
+  nav button { flex:1; border:0; background:none; padding:8px 4px; color:var(--muted); border-bottom:2px solid transparent; border-radius:0; }
+  nav button.on { color:var(--navy); border-bottom-color:var(--navy); font-weight:600; }
+  nav .n { display:inline-block; min-width:16px; padding:0 4px; border-radius:8px; background:var(--line); color:var(--ink); font-size:11px; margin-left:3px; }
+  nav .n.hot { background:var(--red); color:#fff; }
+  main { padding:8px 10px 40px; }
+  .sec { margin:10px 0 4px; font-weight:600; color:var(--navy); display:flex; justify-content:space-between; }
+  .sec .c { color:var(--muted); font-weight:400; }
+  .card { border:1px solid var(--line); border-radius:6px; padding:7px 8px; margin:5px 0; background:#fff; }
+  .card.urgent { border-color:#f3b4b4; background:var(--redbg); }
+  .card .top { display:flex; justify-content:space-between; gap:6px; }
+  .card .v { font-weight:600; cursor:pointer; }
+  .card .v:hover { text-decoration:underline; }
+  .card .d { color:#444; margin-top:2px; word-break:break-word; }
+  .chip { font-size:11px; padding:1px 6px; border-radius:9px; background:#eef2f8; color:var(--navy); white-space:nowrap; }
+  .chip.Alongside { background:#e3f4ea; color:var(--green); }
+  .chip.Expected { background:#fff4e0; color:#8a5a00; }
+  .chip.red { background:var(--red); color:#fff; }
+  .acts { margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; }
+  .acts button { border:1px solid var(--line); background:#fff; padding:2px 8px; font-size:12px; }
+  .acts button.primary { background:var(--navy); border-color:var(--navy); color:#fff; }
+  .empty { color:var(--muted); font-style:italic; padding:4px 0; }
+  input.search { width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:4px; margin:8px 0 2px; font:inherit; }
+  #msg { position:fixed; left:10px; right:10px; bottom:10px; background:#323130; color:#fff; padding:8px 10px; border-radius:4px; display:none; z-index:5; }
+  .err { color:var(--red); padding:10px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Ops Tracker</h1><div class="stamp" id="stamp">Loading...</div></div>
+  <button class="refresh" id="refresh">Refresh</button>
+</header>
+<nav id="tabs">
+  <button data-t="rem" class="on">Reminders <span class="n" id="n-rem">0</span></button>
+  <button data-t="ves">Vessels <span class="n" id="n-ves">0</span></button>
+  <button data-t="job">Jobs <span class="n" id="n-job">0</span></button>
+  <button data-t="crew">Crew <span class="n" id="n-crew">0</span></button>
+</nav>
+<main id="main"></main>
+<div id="msg"></div>
+<script>
+"use strict";
+const CALL_SHEETS = ["Vessel Calls", "Calls 2027 onwards"];
+let tab = "rem", data = null, query = "";
+
+Office.onReady(() => {
+  document.getElementById("refresh").onclick = load;
+  document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
+  load();
+});
+
+function nowSerial() { return (Date.now() + 3 * 3600000) / 86400000 + 25569; }
+function txt(v) { return v === undefined || v === null ? "" : String(v).replace(/[\u200B-\u200D\uFEFF\u00A0]/g, " ").trim(); }
+function num(v) {
+  if (typeof v === "number" && v > 1000) return v;
+  const m = txt(v).match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/);
+  if (!m) return null;
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0) / 86400000 + 25569;
+}
+function timeFrac(v) {
+  if (typeof v === "number") return v >= 0 && v < 1 ? v : v % 1;
+  const m = txt(v).match(/^(\d{1,2})[:.]?(\d{2})/);
+  return m ? (+m[1] * 60 + +m[2]) / 1440 : 0;
+}
+function fmt(serial, withTime) {
+  const d = new Date(Math.round((serial - 25569) * 86400000));
+  const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
+  const p = n => (n < 10 ? "0" : "") + n;
+  const s = p(d.getUTCDate()) + "/" + mon + "/" + d.getUTCFullYear();
+  return withTime ? s + " " + p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) : s;
+}
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+function toast(t) { const m = document.getElementById("msg"); m.textContent = t; m.style.display = "block"; clearTimeout(toast.h); toast.h = setTimeout(() => m.style.display = "none", 2600); }
+
+async function readSheet(ctx, name) {
+  const ws = ctx.workbook.worksheets.getItemOrNullObject(name);
+  await ctx.sync();
+  if (ws.isNullObject) return null;
+  const r = ws.getUsedRangeOrNullObject(true);
+  r.load("values,rowIndex,columnIndex");
+  await ctx.sync();
+  if (r.isNullObject || r.values.length < 2) return null;
+  const heads = r.values[0].map(x => txt(x).toLowerCase());
+  return { name: name, r0: r.rowIndex, c0: r.columnIndex, rows: r.values.slice(1), idx: h => heads.indexOf(h), width: heads.length };
+}
+
+async function load() {
+  document.getElementById("stamp").textContent = "Loading...";
+  try {
+    await Excel.run(async ctx => {
+      const calls = [];
+      for (const n of CALL_SHEETS) { const g = await readSheet(ctx, n); if (g) calls.push(g); }
+      const jobs = await readSheet(ctx, "Jobs");
+      const crew = await readSheet(ctx, "Crew Change");
+      data = build(calls, jobs, crew);
+    });
+    document.getElementById("stamp").textContent = "Updated " + fmt(nowSerial(), true);
+    render();
+  } catch (e) {
+    document.getElementById("stamp").textContent = "Could not read the workbook";
+    document.getElementById("main").innerHTML = '<div class="err">' + esc(e.message || e) + '</div>';
+  }
+}
+
+function ref(g, i, col) { return { sheet: g.name, row: g.r0 + 1 + i, col: col < 0 ? -1 : g.c0 + col, c0: g.c0, width: g.width }; }
+
+function build(calls, jobs, crew) {
+  const now = nowSerial(), todayEnd = Math.floor(now) + 1, weekAgo = now - 7;
+  const R = { ata: [], atb: [], atd: [], notif: [], pre: [], jobO: [], jobD: [], crew: [] };
+  const vessels = [], jobList = [], crewList = [];
+  for (const g of calls) {
+    const c = h => g.idx(h);
+    const iV = c("vessel"), iSc = c("scope"), iEd = c("eta date"), iEt = c("eta time"), iBd = c("atb date"), iBt = c("atb time"), iDd = c("atd date"), iDt = c("atd time"), iSt = c("status"), iEm = c("master email"), iAta = c("ata"), iPre = c("pre-arrival email sent"), iNot = c("arrival notification submission"), iAg = c("agent"), iId = c("call id");
+    g.rows.forEach((r, i) => {
+      const v = txt(r[iV]); if (!v) return;
+      const st = txt(r[iSt]), eta = num(r[iEd]), atd = num(r[iDd]);
+      const at = ref(g, i, -1);
+      if (st !== "Sailed") vessels.push({ v: v, st: st, eta: eta === null ? null : eta + timeFrac(r[iEt]), ag: txt(r[iAg]), sc: txt(r[iSc]), id: txt(r[iId]), at: at });
+      const recent = st !== "Sailed" || (atd !== null && atd >= weekAgo);
+      if (st !== "Sailed" && eta !== null && eta < todayEnd && txt(r[iAta]) === "") R.ata.push({ v: v, d: "ETA " + fmt(eta, false) + " - no ATA recorded", s: st, at: at });
+      if (recent && num(r[iBd]) !== null && txt(r[iBt]) === "") R.atb.push({ v: v, d: "ATB " + fmt(num(r[iBd]), false) + " - time missing", s: st, at: at });
+      if (recent && atd !== null && txt(r[iDt]) === "") R.atd.push({ v: v, d: "ATD " + fmt(atd, false) + " - time missing", s: st, at: at });
+      if (st !== "Expected" || eta === null || /husbandry|opa/i.test(txt(r[iSc]))) return;
+      const etaFull = eta + timeFrac(r[iEt]), days = etaFull - now;
+      if (days > 7 || days < -1) return;
+      const u = days <= 3;
+      const when = "ETA " + fmt(etaFull, true) + (days < 0 ? " (passed)" : " - " + Math.max(0, Math.floor(days)) + " day(s) left");
+      if (!/^(yes|na)$/i.test(txt(r[iNot])) && iNot >= 0) R.notif.push({ v: v, d: when + (txt(r[iAg]) ? " - " + txt(r[iAg]) : ""), s: st, u: u, at: at, mark: ref(g, i, iNot) });
+      if (!/^(yes|na)$/i.test(txt(r[iPre])) && iPre >= 0) R.pre.push({ v: v, d: when + (txt(r[iEm]) ? " - " + txt(r[iEm]) : " - no master email"), s: st, u: u, at: at, mark: ref(g, i, iPre), email: txt(r[iEm]) });
+    });
+  }
+  vessels.sort((a, b) => (a.eta || 9e9) - (b.eta || 9e9));
+  if (jobs) {
+    const iV = jobs.idx("vessel"), iT = jobs.idx("job type"), iDs = jobs.idx("description"), iS = jobs.idx("status"), iDue = jobs.idx("due"), iOw = jobs.idx("owner"), iDone = jobs.idx("done at"), iP = jobs.idx("priority");
+    jobs.rows.forEach((r, i) => {
+      const v = txt(r[iV]), s = txt(r[iS]);
+      if (!v || /^(done|cancelled)$/i.test(s)) return;
+      const due = num(r[iDue]);
+      const j = { v: v, d: [txt(r[iT]), txt(r[iDs])].filter(x => x).join(" - "), s: s, due: due, ow: txt(r[iOw]), p: txt(r[iP]), at: ref(jobs, i, -1), stCell: ref(jobs, i, iS), doneCell: iDone >= 0 ? ref(jobs, i, iDone) : null };
+      j.u = due !== null && due < now;
+      jobList.push(j);
+      if (due === null) return;
+      const label = j.d + " - due " + fmt(due, true) + (j.ow ? " - " + j.ow : "");
+      if (due < now) R.jobO.push(Object.assign({}, j, { d: label, u: true }));
+      else if (due < now + 1) R.jobD.push(Object.assign({}, j, { d: label }));
+    });
+    jobList.sort((a, b) => (a.due || 9e9) - (b.due || 9e9));
+  }
+  if (crew) {
+    const iV = crew.idx("vessel"), iM = crew.idx("movement"), iN = crew.idx("crew name"), iF = crew.idx("flight no."), iFt = crew.idx("flight time"), iA = crew.idx("airport"), iS = crew.idx("status"), iH = crew.idx("hotel");
+    crew.rows.forEach((r, i) => {
+      const v = txt(r[iV]);
+      if (!v || /^(done|cancelled)$/i.test(txt(r[iS]))) return;
+      const ft = num(r[iFt]);
+      const c = { v: v, m: txt(r[iM]), n: txt(r[iN]), f: txt(r[iF]), ft: ft, a: txt(r[iA]), h: txt(r[iH]), s: txt(r[iS]), at: ref(crew, i, -1), stCell: ref(crew, i, iS) };
+      crewList.push(c);
+      if (ft !== null && ft >= now && ft <= now + 2) R.crew.push({ v: v, d: [c.m, c.n, c.f, fmt(ft, true), c.a].filter(x => x).join(" - "), s: c.s, at: c.at, stCell: c.stCell });
+    });
+    crewList.sort((a, b) => (a.ft || 9e9) - (b.ft || 9e9));
+  }
+  const remTotal = Object.values(R).reduce((a, l) => a + l.length, 0);
+  return { R: R, remTotal: remTotal, vessels: vessels, jobs: jobList, crew: crewList };
+}
+
+let acts = [];
+function act(fn) { acts.push(fn); return acts.length - 1; }
+
+function card(it, buttons) {
+  const btns = (buttons || []).map(b => '<button class="' + (b.primary ? "primary" : "") + '" data-a="' + act(b.fn) + '">' + esc(b.label) + '</button>').join("");
+  return '<div class="card' + (it.u ? " urgent" : "") + '"><div class="top"><span class="v" data-a="' + act(() => goTo(it.at)) + '">' + esc(it.v) + '</span>' +
+    (it.u ? '<span class="chip red">URGENT</span>' : (it.s ? '<span class="chip ' + esc(it.s.replace(/\s/g, "")) + '">' + esc(it.s) + '</span>' : "")) +
+    '</div>' + (it.d ? '<div class="d">' + esc(it.d) + '</div>' : "") + (btns ? '<div class="acts">' + btns + '</div>' : "") + '</div>';
+}
+function section(title, list, mk) {
+  return '<div class="sec">' + esc(title) + '<span class="c">' + list.length + '</span></div>' +
+    (list.length ? list.map(mk).join("") : '<div class="empty">Nothing pending</div>');
+}
+
+function render() {
+  acts = [];
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === tab));
+  if (!data) return;
+  const R = data.R;
+  const nr = document.getElementById("n-rem"); nr.textContent = data.remTotal; nr.classList.toggle("hot", data.remTotal > 0);
+  document.getElementById("n-ves").textContent = data.vessels.length;
+  document.getElementById("n-job").textContent = data.jobs.length;
+  document.getElementById("n-crew").textContent = data.crew.length;
+  const go = it => [{ label: "Go to row", fn: () => goTo(it.at) }];
+  let h = "";
+  if (tab === "rem") {
+    h += section("ATA needed", R.ata, it => card(it, go(it)));
+    h += section("ATB time missing", R.atb, it => card(it, go(it)));
+    h += section("ATD time missing", R.atd, it => card(it, go(it)));
+    h += section("Arrival notifications to submit", R.notif, it => card(it, [{ label: "Mark submitted", primary: true, fn: () => setCell(it.mark, "Yes", it.v + ": notification marked submitted") }].concat(go(it))));
+    h += section("Pre-arrival emails to send", R.pre, it => card(it, [{ label: "Mark sent", primary: true, fn: () => setCell(it.mark, "Yes", it.v + ": pre-arrival marked sent") }].concat(it.email ? [{ label: "Email master", fn: () => window.open("mailto:" + encodeURIComponent(it.email) + "?subject=" + encodeURIComponent(it.v + " - pre-arrival information"), "_blank") }] : []).concat(go(it))));
+    h += section("Overdue jobs", R.jobO, it => card(it, [{ label: "Mark done", primary: true, fn: () => jobDone(it) }].concat(go(it))));
+    h += section("Jobs due in 24 hours", R.jobD, it => card(it, [{ label: "Mark done", primary: true, fn: () => jobDone(it) }].concat(go(it))));
+    h += section("Crew moves in 48 hours", R.crew, it => card(it, [{ label: "Mark done", primary: true, fn: () => setCell(it.stCell, "Done", it.v + ": crew move marked done") }].concat(go(it))));
+  } else if (tab === "ves") {
+    h += '<input class="search" id="q" placeholder="Search vessel, agent, status" value="' + esc(query) + '">';
+    const q = query.toLowerCase();
+    const list = data.vessels.filter(x => !q || (x.v + " " + x.ag + " " + x.st + " " + x.sc).toLowerCase().includes(q));
+    h += section("Active vessel calls", list, x => card({ v: x.v, s: x.st, at: x.at, d: [x.eta ? "ETA " + fmt(x.eta, true) : "", x.ag, x.sc].filter(y => y).join(" - ") }, go(x)));
+  } else if (tab === "job") {
+    h += section("Open jobs", data.jobs, j => card({ v: j.v, s: j.s, u: j.u, at: j.at, d: [j.d, j.due ? "due " + fmt(j.due, true) : "no due date", j.ow, j.p].filter(y => y).join(" - ") }, [{ label: "Mark done", primary: true, fn: () => jobDone(j) }].concat(go(j))));
+  } else {
+    h += section("Open crew changes", data.crew, c => card({ v: c.v, s: c.s, at: c.at, d: [c.m, c.n, c.f, c.ft ? fmt(c.ft, true) : "", c.a, c.h].filter(y => y).join(" - ") }, [{ label: "Mark done", primary: true, fn: () => setCell(c.stCell, "Done", c.v + ": crew move marked done") }].concat(go(c))));
+  }
+  const main = document.getElementById("main");
+  main.innerHTML = h;
+  main.querySelectorAll("[data-a]").forEach(el => el.onclick = () => acts[+el.dataset.a]());
+  const qi = document.getElementById("q");
+  if (qi) { qi.oninput = () => { query = qi.value; const p = qi.selectionStart; render(); const n = document.getElementById("q"); n.focus(); n.setSelectionRange(p, p); }; }
+}
+
+async function goTo(at) {
+  try {
+    await Excel.run(async ctx => {
+      const ws = ctx.workbook.worksheets.getItem(at.sheet);
+      ws.activate();
+      ws.getRangeByIndexes(at.row, at.c0, 1, Math.max(1, at.width)).select();
+      await ctx.sync();
+    });
+  } catch (e) { toast("Could not open the row: " + (e.message || e)); }
+}
+
+async function setCell(at, value, okMsg) {
+  if (!at || at.col < 0) { toast("Column not found in the sheet"); return; }
+  try {
+    await Excel.run(async ctx => {
+      ctx.workbook.worksheets.getItem(at.sheet).getCell(at.row, at.col).values = [[value]];
+      await ctx.sync();
+    });
+    toast(okMsg);
+    load();
+  } catch (e) { toast("Could not update: " + (e.message || e)); }
+}
+
+async function jobDone(j) {
+  try {
+    await Excel.run(async ctx => {
+      const ws = ctx.workbook.worksheets.getItem(j.stCell.sheet);
+      ws.getCell(j.stCell.row, j.stCell.col).values = [["Done"]];
+      if (j.doneCell) {
+        const c = ws.getCell(j.doneCell.row, j.doneCell.col);
+        c.values = [[Math.round(nowSerial() * 1440) / 1440]];
+        c.numberFormat = [["dd/mmm/yyyy hh:mm"]];
+      }
+      await ctx.sync();
+    });
+    toast(j.v + ": job marked done");
+    load();
+  } catch (e) { toast("Could not update: " + (e.message || e)); }
+}
+</script>
+</body>
+</html>
